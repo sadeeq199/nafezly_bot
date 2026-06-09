@@ -1,4 +1,3 @@
-```python
 import json
 import asyncio
 import requests
@@ -249,4 +248,3 @@ threading.Thread(target=run_web, daemon=True).start()
 print("Bot Started...")
 
 app.run_polling()
-```
