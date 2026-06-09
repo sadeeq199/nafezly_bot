@@ -247,4 +247,7 @@ threading.Thread(target=run_web, daemon=True).start()
 
 print("Bot Started...")
 
-app.run_polling()
+app.run_polling(
+    drop_pending_updates=True,
+    allowed_updates=Update.ALL_TYPES
+)
