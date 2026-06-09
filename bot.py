@@ -9,6 +9,7 @@ import threading
 import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+OWNER_ID = 2121957939
 
 
 # الاشتراك
@@ -86,6 +87,34 @@ async def count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 عدد المشتركين الحالي: {len(users)}"
     )
 
+async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if update.effective_chat.id != OWNER_ID:
+        return
+
+    try:
+        with open("subscribers.json", "r", encoding="utf-8") as f:
+            users = json.load(f)
+    except:
+        users = []
+
+    if not users:
+        await update.message.reply_text("لا يوجد مشتركون.")
+        return
+
+    text = f"👥 عدد المشتركين: {len(users)}\n\n"
+
+    for user in users:
+
+        first_name = user.get("first_name", "Unknown")
+        username = user.get("username")
+
+        if username:
+            text += f"• {first_name} (@{username})\n"
+        else:
+            text += f"• {first_name}\n"
+
+    await update.message.reply_text(text)
 
 # مراقبة المشاريع
 async def check_projects(app):
@@ -182,6 +211,7 @@ app = (
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("stop", stop))
 app.add_handler(CommandHandler("count", count))
+app.add_handler(CommandHandler("users", users))
 
 
 # ------------------- Flask Server for Render -------------------
