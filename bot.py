@@ -5,7 +5,9 @@ from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-BOT_TOKEN = "8934109257:AAF0DAKvV6y24JgzjFlr3W4a6t7-x7mH7Cg"
+import os
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 
 # الاشتراك
