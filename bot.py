@@ -14,22 +14,35 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 # الاشتراك
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
+    username = update.effective_user.username
+    first_name = update.effective_user.first_name
 
     try:
-        with open("subscribers.json", "r") as f:
+        with open("subscribers.json", "r", encoding="utf-8") as f:
             users = json.load(f)
     except:
         users = []
 
-    if chat_id not in users:
-        users.append(chat_id)
+    # التأكد أن المستخدم غير موجود بالفعل
+    exists = any(user["chat_id"] == chat_id for user in users)
 
-        with open("subscribers.json", "w") as f:
-            json.dump(users, f)
+    if not exists:
+
+        user_data = {
+            "chat_id": chat_id,
+            "username": username,
+            "first_name": first_name
+        }
+
+        users.append(user_data)
+
+        with open("subscribers.json", "w", encoding="utf-8") as f:
+            json.dump(users, f, ensure_ascii=False, indent=4)
 
         await update.message.reply_text(
             "✅ تم الاشتراك بنجاح.\nستصلك إشعارات المشاريع الجديدة من نفذلي."
         )
+
     else:
         await update.message.reply_text(
             "✅ أنت مشترك بالفعل."
