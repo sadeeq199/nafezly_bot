@@ -132,7 +132,8 @@ async def check_projects(app):
 
         response = requests.get(
             "https://nafezly.com/projects",
-            headers={"User-Agent": "Mozilla/5.0"}
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20
         )
 
         soup = BeautifulSoup(response.text, "html.parser")
@@ -239,7 +240,8 @@ def home():
 def run_web():
     web_app.run(
         host="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000))
+        port=int(os.environ.get("PORT", 10000)),
+        use_reloader=False
     )
 
 
@@ -249,5 +251,6 @@ print("Bot Started...")
 
 app.run_polling(
     drop_pending_updates=True,
-    allowed_updates=Update.ALL_TYPES
+    allowed_updates=Update.ALL_TYPES,
+    close_loop=False
 )
