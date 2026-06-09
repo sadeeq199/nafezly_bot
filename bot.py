@@ -1,18 +1,21 @@
+```python
 import json
 import asyncio
 import requests
+import os
+import threading
 from bs4 import BeautifulSoup
+from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from flask import Flask
-import threading
-import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = 2121957939
 
 
+# ===========================
 # الاشتراك
+# ===========================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     username = update.effective_user.username
@@ -24,18 +27,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         users = []
 
-    # التأكد أن المستخدم غير موجود بالفعل
     exists = any(user["chat_id"] == chat_id for user in users)
 
     if not exists:
 
-        user_data = {
+        users.append({
             "chat_id": chat_id,
             "username": username,
             "first_name": first_name
-        }
-
-        users.append(user_data)
+        })
 
         with open("subscribers.json", "w", encoding="utf-8") as f:
             json.dump(users, f, ensure_ascii=False, indent=4)
@@ -50,35 +50,32 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ===========================
 # إلغاء الاشتراك
+# ===========================
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     try:
-        with open("subscribers.json", "r") as f:
+        with open("subscribers.json", "r", encoding="utf-8") as f:
             users = json.load(f)
     except:
         users = []
 
-    if chat_id in users:
-        users.remove(chat_id)
+    users = [user for user in users if user["chat_id"] != chat_id]
 
-        with open("subscribers.json", "w") as f:
-            json.dump(users, f)
+    with open("subscribers.json", "w", encoding="utf-8") as f:
+        json.dump(users, f, ensure_ascii=False, indent=4)
 
-        await update.message.reply_text(
-            "❌ تم إلغاء الاشتراك."
-        )
-    else:
-        await update.message.reply_text(
-            "أنت غير مشترك."
-        )
+    await update.message.reply_text("❌ تم إلغاء الاشتراك.")
 
 
+# ===========================
 # عدد المشتركين
+# ===========================
 async def count(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        with open("subscribers.json", "r") as f:
+        with open("subscribers.json", "r", encoding="utf-8") as f:
             users = json.load(f)
     except:
         users = []
@@ -87,6 +84,10 @@ async def count(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👥 عدد المشتركين الحالي: {len(users)}"
     )
 
+
+# ===========================
+# عرض المشتركين
+# ===========================
 async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if update.effective_chat.id != OWNER_ID:
@@ -94,17 +95,17 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         with open("subscribers.json", "r", encoding="utf-8") as f:
-            users = json.load(f)
+            users_list = json.load(f)
     except:
-        users = []
+        users_list = []
 
-    if not users:
+    if not users_list:
         await update.message.reply_text("لا يوجد مشتركون.")
         return
 
-    text = f"👥 عدد المشتركين: {len(users)}\n\n"
+    text = f"👥 عدد المشتركين: {len(users_list)}\n\n"
 
-    for user in users:
+    for user in users_list:
 
         first_name = user.get("first_name", "Unknown")
         username = user.get("username")
@@ -116,15 +117,18 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text)
 
+
+# ===========================
 # مراقبة المشاريع
+# ===========================
 async def check_projects(app):
+
     try:
-        with open("sent_projects.json", "r") as f:
+        with open("sent_projects.json", "r", encoding="utf-8") as f:
             sent_projects = set(json.load(f))
     except:
         sent_projects = set()
 
-    # أول تشغيل فقط
     if len(sent_projects) == 0:
 
         response = requests.get(
@@ -137,15 +141,15 @@ async def check_projects(app):
         projects = soup.select("a[href*='/project/']")
 
         for project in projects:
-            link = project["href"]
-            sent_projects.add(link)
+            sent_projects.add(project["href"])
 
-        with open("sent_projects.json", "w") as f:
-            json.dump(list(sent_projects), f)
+        with open("sent_projects.json", "w", encoding="utf-8") as f:
+            json.dump(list(sent_projects), f, ensure_ascii=False, indent=4)
 
         print("Initial projects loaded.")
 
     while True:
+
         try:
 
             response = requests.get(
@@ -166,24 +170,30 @@ async def check_projects(app):
 
                     sent_projects.add(link)
 
-                    with open("sent_projects.json", "w") as f:
-                        json.dump(list(sent_projects), f)
+                    with open("sent_projects.json", "w", encoding="utf-8") as f:
+                        json.dump(list(sent_projects), f, ensure_ascii=False, indent=4)
 
-                    with open("subscribers.json", "r") as f:
-                        users = json.load(f)
+                    try:
+                        with open("subscribers.json", "r", encoding="utf-8") as f:
+                            users_list = json.load(f)
+                    except:
+                        users_list = []
 
                     message = (
                         "🚨 مشروع جديد على نفذلي\n\n"
                         f"📌 العنوان:\n{title}\n\n"
-                        f"🔗 رابط المشروع:\n{link}\n\n"
+                        f"🔗 رابط المشروع:\n{link}"
                     )
 
-                    for user in users:
+                    for user in users_list:
+
                         try:
+
                             await app.bot.send_message(
-                                chat_id=user,
+                                chat_id=user["chat_id"],
                                 text=message
                             )
+
                         except Exception as e:
                             print(e)
 
@@ -196,7 +206,9 @@ async def check_projects(app):
             await asyncio.sleep(30)
 
 
-# تشغيل مراقبة المشاريع
+# ===========================
+# تشغيل المراقبة
+# ===========================
 async def post_init(app):
     asyncio.create_task(check_projects(app))
 
@@ -214,26 +226,27 @@ app.add_handler(CommandHandler("count", count))
 app.add_handler(CommandHandler("users", users))
 
 
-# ------------------- Flask Server for Render -------------------
-from flask import Flask
-import threading
-
+# ===========================
+# Flask لـ Render
+# ===========================
 web_app = Flask(__name__)
 
 
-@web_app.route('/')
+@web_app.route("/")
 def home():
     return "Bot is running!"
 
 
 def run_web():
-    web_app.run(host="0.0.0.0", port=10000)
+    web_app.run(
+        host="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000))
+    )
 
 
-threading.Thread(target=run_web).start()
-
-# ---------------------------------------------------------------
+threading.Thread(target=run_web, daemon=True).start()
 
 print("Bot Started...")
 
 app.run_polling()
+```
