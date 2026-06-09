@@ -4,7 +4,8 @@ import requests
 from bs4 import BeautifulSoup
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-
+from flask import Flask
+import threading
 import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -168,6 +169,27 @@ app = (
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("stop", stop))
 app.add_handler(CommandHandler("count", count))
+
+
+# ------------------- Flask Server for Render -------------------
+from flask import Flask
+import threading
+
+web_app = Flask(__name__)
+
+
+@web_app.route('/')
+def home():
+    return "Bot is running!"
+
+
+def run_web():
+    web_app.run(host="0.0.0.0", port=10000)
+
+
+threading.Thread(target=run_web).start()
+
+# ---------------------------------------------------------------
 
 print("Bot Started...")
 
