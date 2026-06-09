@@ -77,7 +77,23 @@ def _write_json(path: str, data) -> None:
 # ===========================
 
 def load_subscribers() -> list[dict]:
-    return _read_json(SUBSCRIBERS_FILE, [])
+    """Load subscribers, normalizing legacy format (plain int list) to dicts."""
+    raw = _read_json(SUBSCRIBERS_FILE, [])
+    normalized = []
+    needs_save = False
+    for entry in raw:
+        if isinstance(entry, int):
+            # Legacy format: bare chat_id integer
+            normalized.append({"chat_id": entry, "username": None, "first_name": "Unknown"})
+            needs_save = True
+        elif isinstance(entry, dict) and "chat_id" in entry:
+            normalized.append(entry)
+        else:
+            logger.warning("Skipping unrecognized subscriber entry: %r", entry)
+    if needs_save:
+        logger.info("load_subscribers: migrated legacy int entries to dict format, saving.")
+        save_subscribers(normalized)
+    return normalized
 
 
 def save_subscribers(users: list[dict]) -> None:
@@ -252,22 +268,21 @@ async def check_projects(app: Application) -> None:
                 )
 
                 for user in subscribers:
+                    # Support both dict {"chat_id": ...} and bare int (legacy)
+                    chat_id = user["chat_id"] if isinstance(user, dict) else user
                     try:
-                        await app.bot.send_message(
-                            chat_id=user["chat_id"],
-                            text=message,
-                        )
-                        logger.debug("Notified chat_id=%s", user["chat_id"])
+                        await app.bot.send_message(chat_id=chat_id, text=message)
+                        logger.debug("Notified chat_id=%s", chat_id)
                     except Forbidden:
                         # User blocked the bot – remove them
-                        logger.warning("chat_id=%s blocked the bot, removing.", user["chat_id"])
+                        logger.warning("chat_id=%s blocked the bot, removing.", chat_id)
                         all_users = load_subscribers()
-                        all_users = [u for u in all_users if u["chat_id"] != user["chat_id"]]
+                        all_users = [u for u in all_users if (u["chat_id"] if isinstance(u, dict) else u) != chat_id]
                         save_subscribers(all_users)
                     except NetworkError as net_err:
-                        logger.error("Network error sending to chat_id=%s: %s", user["chat_id"], net_err)
+                        logger.error("Network error sending to chat_id=%s: %s", chat_id, net_err)
                     except Exception as exc:
-                        logger.error("Unexpected error sending to chat_id=%s: %s", user["chat_id"], exc)
+                        logger.error("Unexpected error sending to chat_id=%s: %s", chat_id, exc)
 
             if new_count:
                 logger.info("Project monitor: notified subscribers about %d new project(s).", new_count)
