@@ -341,35 +341,6 @@ async def users(update: Update, context: ContextTypes.DEFAULT_TYPE):
             check_projects(app)
         )
 
-# ==========================
-# Flask
-# ==========================
-web_app = Flask(__name__)
-
-
-@web_app.route("/")
-def home():
-
-    return "Bot is running!"
-
-
-def run_web():
-
-    web_app.run(
-        host="0.0.0.0",
-        port=int(
-            os.environ.get(
-                "PORT",
-                10000
-            )
-        )
-    )
-
-
-threading.Thread(
-    target=run_web,
-    daemon=True
-).start()
 
 
 # ==========================
@@ -410,11 +381,27 @@ app.add_handler(
     )
 )
 
+# ==========================
+# Webhook Settings
+# ==========================
+WEBHOOK_URL = "https://nafezly-bot-5vdr.onrender.com"
+
+PORT = int(
+    os.environ.get(
+        "PORT",
+        10000
+    )
+)
+
+
 print(
     "Bot Started..."
 )
 
-app.run_polling(
+
+app.run_webhook(
+    listen="0.0.0.0",
+    port=PORT,
+    webhook_url=WEBHOOK_URL,
     drop_pending_updates=True
 )
-
