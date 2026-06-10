@@ -2,7 +2,7 @@ import json
 import os
 import asyncio
 import secrets
-import requests
+import httpx
 
 from bs4 import BeautifulSoup
 from telegram import Update
@@ -26,7 +26,7 @@ SECRET_TOKEN = os.environ.get("SECRET_TOKEN", secrets.token_hex(32))
 SUBSCRIBERS_FILE = "subscribers.json"
 SENT_PROJECTS_FILE = "sent_projects.json"
 NAFEZLY_URL = "https://nafezly.com/projects"
-CHECK_INTERVAL = 60
+CHECK_INTERVAL = 30
 
 
 # ==========================
@@ -83,13 +83,15 @@ def save_sent_projects(projects):
 async def check_projects(app: Application) -> None:
     sent_projects = load_sent_projects()
 
-    if len(sent_projects) == 0:
+    if not sent_projects:
         try:
-            response = requests.get(
-                NAFEZLY_URL,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=10,
-            )
+
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    NAFEZLY_URL,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=10,
+                )
             soup = BeautifulSoup(response.text, "html.parser")
             projects = soup.select("a[href*='/project/']")
             for project in projects:
@@ -100,11 +102,13 @@ async def check_projects(app: Application) -> None:
 
     while True:
         try:
-            response = requests.get(
-                NAFEZLY_URL,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=10,
-            )
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    NAFEZLY_URL,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=10,
+                )
+
             soup = BeautifulSoup(response.text, "html.parser")
             projects = soup.select("a[href*='/project/']")
             users = load_subscribers()
@@ -134,16 +138,14 @@ async def check_projects(app: Application) -> None:
 
             await asyncio.sleep(CHECK_INTERVAL)
 
-        except requests.Timeout:
+        except httpx.TimeoutException:
             await asyncio.sleep(120)
 
-        except requests.RequestException:
+        except httpx.RequestError:
             await asyncio.sleep(120)
 
         except Exception:
             await asyncio.sleep(120)
-
-
 # ==========================
 # Background Task
 # ==========================
