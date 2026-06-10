@@ -1,7 +1,10 @@
 import json
 import os
 import threading
+import asyncio
+import requests
 
+from bs4 import BeautifulSoup
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
@@ -10,22 +13,178 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 OWNER_ID = 2121957939
 
 SUBSCRIBERS_FILE = "subscribers.json"
+SENT_PROJECTS_FILE = "sent_projects.json"
+
+NAFEZLY_URL = "https://nafezly.com/projects"
 
 
 # ==========================
 # Subscribers Helpers
 # ==========================
+```python
+# ==========================
+# Subscribers Helpers
+# ==========================
 def load_subscribers():
+
     try:
+
         with open(SUBSCRIBERS_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
+
     except:
+
         return []
 
 
 def save_subscribers(users):
+
     with open(SUBSCRIBERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=4)
+
+        json.dump(
+            users,
+            f,
+            ensure_ascii=False,
+            indent=4
+        )
+
+
+# ==========================
+# Sent Projects Helpers
+# ==========================
+def load_sent_projects():
+
+    try:
+
+        with open(SENT_PROJECTS_FILE, "r", encoding="utf-8") as f:
+            return set(json.load(f))
+
+    except:
+
+        return set()
+
+
+def save_sent_projects(projects):
+    # ==========================
+    # Project Monitor
+    # ==========================
+    async def check_projects(app):
+        # ==========================
+        # Start Background Task
+        # ==========================
+        async def post_init(app):
+
+            asyncio.create_task(
+                check_projects(app)
+            )
+
+        sent_projects = load_sent_projects()
+
+        # أول تشغيل
+        if len(sent_projects) == 0:
+
+            try:
+
+                response = requests.get(
+                    NAFEZLY_URL,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=10
+                )
+
+                soup = BeautifulSoup(
+                    response.text,
+                    "html.parser"
+                )
+
+                projects = soup.select(
+                    "a[href*='/project/']"
+                )
+
+                for project in projects:
+                    sent_projects.add(
+                        project["href"]
+                    )
+
+                save_sent_projects(
+                    sent_projects
+                )
+
+            except:
+
+                pass
+
+        while True:
+
+            try:
+
+                response = requests.get(
+                    NAFEZLY_URL,
+                    headers={"User-Agent": "Mozilla/5.0"},
+                    timeout=10
+                )
+
+                soup = BeautifulSoup(
+                    response.text,
+                    "html.parser"
+                )
+
+                projects = soup.select(
+                    "a[href*='/project/']"
+                )
+
+                users = load_subscribers()
+
+                for project in projects:
+
+                    title = project.get_text(
+                        strip=True
+                    )
+
+                    link = project["href"]
+
+                    if link not in sent_projects:
+
+                        sent_projects.add(
+                            link
+                        )
+
+                        save_sent_projects(
+                            sent_projects
+                        )
+
+                        message = (
+                            "🚨 مشروع جديد على نفذلي\n\n"
+                            f"📌 العنوان:\n{title}\n\n"
+                            f"🔗 رابط المشروع:\n{link}"
+                        )
+
+                        for user in users:
+
+                            try:
+
+                                await app.bot.send_message(
+                                    chat_id=user["chat_id"],
+                                    text=message
+                                )
+
+                            except:
+
+                                pass
+
+                await asyncio.sleep(60)
+
+            except:
+
+                await asyncio.sleep(120)
+
+    with open(SENT_PROJECTS_FILE, "w", encoding="utf-8") as f:
+
+        json.dump(
+            list(projects),
+            f,
+            ensure_ascii=False,
+            indent=4
+        )
 
 
 # ==========================
@@ -144,7 +303,12 @@ threading.Thread(
 # ==========================
 # Telegram
 # ==========================
-app = Application.builder().token(BOT_TOKEN).build()
+app = (
+    Application.builder()
+    .token(BOT_TOKEN)
+    .post_init(post_init)
+    .build()
+)
 
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("stop", stop))
