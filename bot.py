@@ -21,7 +21,6 @@ NAFEZLY_URL = "https://nafezly.com/projects"
 # ==========================
 # Subscribers Helpers
 # ==========================
-```python
 # ==========================
 # Subscribers Helpers
 # ==========================
