@@ -1,8 +1,8 @@
-import json
 import os
 import asyncio
 import secrets
 import httpx
+import psycopg2
 
 from bs4 import BeautifulSoup
 from telegram import Update
@@ -23,58 +23,86 @@ WEBHOOK_URL = "https://nafezly-bot-5vdr.onrender.com".rstrip("/")
 PORT = int(os.environ.get("PORT", 10000))
 SECRET_TOKEN = os.environ.get("SECRET_TOKEN", secrets.token_hex(32))
 
-SUBSCRIBERS_FILE = "subscribers.json"
-SENT_PROJECTS_FILE = "sent_projects.json"
+
 NAFEZLY_URL = "https://nafezly.com/projects"
 CHECK_INTERVAL = 30
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+conn = psycopg2.connect(DATABASE_URL)
+conn.autocommit = True
+cursor = conn.cursor()
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS subscribers (
+    chat_id BIGINT PRIMARY KEY,
+    username TEXT,
+    first_name TEXT
+)
+""")
+
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS sent_projects (
+    link TEXT PRIMARY KEY
+)
+""")
 
 
 # ==========================
 # Subscribers Helpers
 # ==========================
-
 def load_subscribers():
-    try:
-        with open(SUBSCRIBERS_FILE, "r", encoding="utf-8") as f:
-            users = json.load(f)
-    except Exception:
-        users = []
+    cursor.execute(
+        "SELECT chat_id, username, first_name FROM subscribers"
+    )
 
-    migrated = []
-    for user in users:
-        if isinstance(user, int):
-            migrated.append({
-                "chat_id": user,
-                "username": None,
-                "first_name": "Unknown",
-            })
-        else:
-            migrated.append(user)
+    rows = cursor.fetchall()
 
-    return migrated
+    return [
+        {
+            "chat_id": row[0],
+            "username": row[1],
+            "first_name": row[2],
+        }
+        for row in rows
+    ]
 
 
-def save_subscribers(users):
-    with open(SUBSCRIBERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=4)
+def add_subscriber(chat_id, username, first_name):
+    cursor.execute(
+        """
+        INSERT INTO subscribers(chat_id, username, first_name)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (chat_id) DO NOTHING
+        """,
+        (chat_id, username, first_name),
+    )
 
 
-# ==========================
-# Sent Projects Helpers
-# ==========================
+def remove_subscriber(chat_id):
+    cursor.execute(
+        "DELETE FROM subscribers WHERE chat_id = %s",
+        (chat_id,),
+    )
+
 
 def load_sent_projects():
-    try:
-        with open(SENT_PROJECTS_FILE, "r", encoding="utf-8") as f:
-            return set(json.load(f))
-    except Exception:
-        return set()
+    cursor.execute(
+        "SELECT link FROM sent_projects"
+    )
+
+    return set(row[0] for row in cursor.fetchall())
 
 
-def save_sent_projects(projects):
-    with open(SENT_PROJECTS_FILE, "w", encoding="utf-8") as f:
-        json.dump(list(projects), f, ensure_ascii=False, indent=4)
-
+def add_sent_project(link):
+    cursor.execute(
+        """
+        INSERT INTO sent_projects(link)
+        VALUES (%s)
+        ON CONFLICT (link) DO NOTHING
+        """,
+        (link,),
+    )
 
 # ==========================
 # Project Monitor
@@ -85,67 +113,69 @@ async def check_projects(app: Application) -> None:
 
     if not sent_projects:
         try:
-
             async with httpx.AsyncClient() as client:
                 response = await client.get(
                     NAFEZLY_URL,
                     headers={"User-Agent": "Mozilla/5.0"},
                     timeout=10,
                 )
+
             soup = BeautifulSoup(response.text, "html.parser")
             projects = soup.select("a[href*='/project/']")
+
             for project in projects:
                 sent_projects.add(project["href"])
-            save_sent_projects(sent_projects)
+                add_sent_project(project["href"])
+
         except Exception:
             pass
 
-    while True:
-        try:
-            async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient() as client:
+        while True:
+            try:
                 response = await client.get(
                     NAFEZLY_URL,
                     headers={"User-Agent": "Mozilla/5.0"},
                     timeout=10,
                 )
 
-            soup = BeautifulSoup(response.text, "html.parser")
-            projects = soup.select("a[href*='/project/']")
-            users = load_subscribers()
+                soup = BeautifulSoup(response.text, "html.parser")
+                projects = soup.select("a[href*='/project/']")
+                users = load_subscribers()
 
-            for project in projects:
-                title = project.get_text(strip=True)
-                link = project["href"]
+                for project in projects:
+                    title = project.get_text(strip=True)
+                    link = project["href"]
 
-                if link not in sent_projects:
-                    sent_projects.add(link)
-                    save_sent_projects(sent_projects)
+                    if link not in sent_projects:
+                        sent_projects.add(link)
+                        add_sent_project(link)
 
-                    message = (
-                        "🚨 مشروع جديد على نفذلي\n\n"
-                        f"📌 العنوان:\n{title}\n\n"
-                        f"🔗 رابط المشروع:\n{link}"
-                    )
+                        message = (
+                            "🚨 مشروع جديد على نفذلي\n\n"
+                            f"📌 العنوان:\n{title}\n\n"
+                            f"🔗 رابط المشروع:\n{link}"
+                        )
 
-                    for user in users:
-                        try:
-                            await app.bot.send_message(
-                                chat_id=user["chat_id"],
-                                text=message,
-                            )
-                        except Exception:
-                            pass
+                        for user in users:
+                            try:
+                                await app.bot.send_message(
+                                    chat_id=user["chat_id"],
+                                    text=message,
+                                )
+                            except Exception:
+                                pass
 
-            await asyncio.sleep(CHECK_INTERVAL)
+                await asyncio.sleep(CHECK_INTERVAL)
 
-        except httpx.TimeoutException:
-            await asyncio.sleep(120)
+            except httpx.TimeoutException:
+                await asyncio.sleep(120)
 
-        except httpx.RequestError:
-            await asyncio.sleep(120)
+            except httpx.RequestError:
+                await asyncio.sleep(120)
 
-        except Exception:
-            await asyncio.sleep(120)
+            except Exception:
+                await asyncio.sleep(120)
 # ==========================
 # Background Task
 # ==========================
@@ -167,12 +197,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     exists = any(user["chat_id"] == chat_id for user in users)
 
     if not exists:
-        users.append({
-            "chat_id": chat_id,
-            "username": username,
-            "first_name": first_name,
-        })
-        save_subscribers(users)
+        add_subscriber(
+            chat_id,
+            username,
+            first_name
+        )
         await update.message.reply_text(
             "✅ تم الاشتراك بنجاح.\nستصلك إشعارات المشاريع الجديدة من نفذلي."
         )
@@ -182,9 +211,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
-    users = load_subscribers()
-    users = [user for user in users if user["chat_id"] != chat_id]
-    save_subscribers(users)
+    remove_subscriber(chat_id)
     await update.message.reply_text("❌ تم إلغاء الاشتراك.")
 
 
