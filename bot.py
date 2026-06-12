@@ -326,6 +326,25 @@ def _scrape_nafezly_projects(html: str) -> list[tuple[str, str]]:
 
 
 def _scrape_mostaql_projects(html: str) -> list[tuple[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
+
+    results = []
+
+    for tag in soup.find_all("a", href=True):
+        href = tag["href"]
+
+        if href.startswith("/"):
+            href = "https://mostaql.com" + href
+
+        if "/project/" in href:
+            title = tag.get_text(strip=True)
+
+            if title:
+                results.append((title, href))
+
+    logger.info(f"FOUND PROJECTS = {results[:20]}")
+
+    return results
     """Scrape project links from Mostaql HTML."""
     soup = BeautifulSoup(html, "html.parser")
     results = []
