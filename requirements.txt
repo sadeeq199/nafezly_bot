@@ -1,5 +1,6 @@
-python-telegram-bot[webhooks]
-requests
+python-telegram-bot
+httpx
+psycopg2-binary
 beautifulsoup4
-Flask
-psycopg2-binary==2.9.10
+starlette
+uvicorn
