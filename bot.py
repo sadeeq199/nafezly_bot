@@ -26,8 +26,10 @@ from starlette.responses import PlainTextResponse
 from starlette.routing import Route
 from telegram import Update
 from telegram.error import TelegramError, TimedOut, NetworkError, RetryAfter
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
 )
@@ -669,6 +671,27 @@ def _task_status(task: asyncio.Task | None) -> str:
 # Command handlers
 # ==========================
 
+def _main_keyboard() -> InlineKeyboardMarkup:
+    """Return the main inline keyboard."""
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("📊 Status",  callback_data="cb_status"),
+            InlineKeyboardButton("📈 Stats",   callback_data="cb_stats"),
+        ],
+        [
+            InlineKeyboardButton("🏓 Ping",    callback_data="cb_ping"),
+            InlineKeyboardButton("❓ Help",    callback_data="cb_help"),
+        ],
+        [
+            InlineKeyboardButton("🔖 Version", callback_data="cb_version"),
+            InlineKeyboardButton("❤️ Health",  callback_data="cb_health"),
+        ],
+        [
+            InlineKeyboardButton("❌ Stop",    callback_data="cb_stop"),
+        ],
+    ])
+
+
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     username = update.effective_user.username
@@ -689,12 +712,18 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("⚠️ حدث خطأ. يرجى المحاولة لاحقاً.")
         return
 
-    if inserted:
-        await update.message.reply_text(
-            "✅ تم الاشتراك بنجاح.\nستصلك إشعارات المشاريع الجديدة من نفذلي ومستقل."
-        )
-    else:
-        await update.message.reply_text("✅ أنت مشترك بالفعل.")
+    status_line = "✅ تم الاشتراك بنجاح." if inserted else "✅ أنت مشترك بالفعل."
+    welcome_text = (
+        f"{status_line}\n\n"
+        "ستصلك إشعارات المشاريع الجديدة من:\n"
+        "• نفذلي\n"
+        "• مستقل\n\n"
+        f"⏱ Uptime: {_uptime_str()}"
+    )
+    await update.message.reply_text(
+        welcome_text,
+        reply_markup=_main_keyboard(),
+    )
 
 
 async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -831,6 +860,135 @@ async def cmd_version(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 # ==========================
+# Callback query handler
+# ==========================
+
+async def _get_status_text() -> str:
+    loop = asyncio.get_running_loop()
+    try:
+        sub_count = len(await loop.run_in_executor(None, db_load_subscribers))
+        proj_count = await loop.run_in_executor(None, db_count_sent_projects)
+    except Exception:
+        sub_count = proj_count = -1
+    return (
+        "📊 *Bot Status*\n\n"
+        f"🤖 Bot: 🟢 Online\n"
+        f"📡 Nafezly Monitor: {_task_status(_monitor_nafezly_task)}\n"
+        f"📡 Mostaql Monitor: {_task_status(_monitor_mostaql_task)}\n"
+        f"💓 Keep-alive: {_task_status(_keepalive_task)}\n"
+        f"👥 Subscribers: {sub_count}\n"
+        f"📁 Known Projects: {proj_count}\n"
+        f"⏱ Uptime: {_uptime_str()}"
+    )
+
+
+async def _get_stats_text() -> str:
+    loop = asyncio.get_running_loop()
+    try:
+        sub_count = len(await loop.run_in_executor(None, db_load_subscribers))
+        proj_total = await loop.run_in_executor(None, db_count_sent_projects)
+        proj_nafezly = await loop.run_in_executor(
+            None, db_count_sent_projects_by_source, SOURCE_NAFEZLY
+        )
+        proj_mostaql = await loop.run_in_executor(
+            None, db_count_sent_projects_by_source, SOURCE_MOSTAQL
+        )
+        db_ok = await loop.run_in_executor(None, db_check_connection)
+    except Exception:
+        sub_count = proj_total = proj_nafezly = proj_mostaql = -1
+        db_ok = False
+    return (
+        "📈 *Bot Statistics*\n\n"
+        f"👥 Total Subscribers: {sub_count}\n"
+        f"📁 Total Known Projects: {proj_total}\n"
+        f"   ├ Nafezly: {proj_nafezly}\n"
+        f"   └ Mostaql: {proj_mostaql}\n"
+        f"🗄 Database: {'🟢 Connected' if db_ok else '🔴 Error'}\n"
+        f"📡 Nafezly Monitor: {_task_status(_monitor_nafezly_task)}\n"
+        f"📡 Mostaql Monitor: {_task_status(_monitor_mostaql_task)}"
+    )
+
+
+def _get_ping_text() -> str:
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return f"Pong 🟢\n\n⏱ Uptime: {_uptime_str()}\n🕐 Time: {now}"
+
+
+def _get_help_text() -> str:
+    return (
+        "🤖 *أوامر البوت*\n\n"
+        "/start — الاشتراك في الإشعارات\n"
+        "/stop — إلغاء الاشتراك\n"
+        "/count — عدد المشتركين\n"
+        "/ping — التحقق من حالة البوت\n"
+        "/status — تفاصيل حالة النظام\n"
+        "/stats — إحصائيات البوت\n"
+        "/health — التحقق من صحة البوت\n"
+        "/version — معلومات الإصدار\n"
+        "/help — عرض هذه القائمة"
+    )
+
+
+def _get_version_text() -> str:
+    py_version = platform.python_version()
+    render_env = os.environ.get("RENDER", "local")
+    return (
+        f"🔖 *Version Info*\n\n"
+        f"🤖 Bot Version: {BOT_VERSION}\n"
+        f"🐍 Python: {py_version}\n"
+        f"☁️ Environment: {render_env}"
+    )
+
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle all inline keyboard button presses."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    parse_mode = "Markdown"
+
+    if data == "cb_status":
+        text = await _get_status_text()
+    elif data == "cb_stats":
+        text = await _get_stats_text()
+    elif data == "cb_ping":
+        text = _get_ping_text()
+        parse_mode = None
+    elif data == "cb_help":
+        text = _get_help_text()
+    elif data == "cb_version":
+        text = _get_version_text()
+    elif data == "cb_health":
+        text = "❤️ Bot is alive 🟢"
+        parse_mode = None
+    elif data == "cb_stop":
+        chat_id = update.effective_chat.id
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, db_remove_subscriber, chat_id)
+        except Exception:
+            logger.exception("DB error in cb_stop for chat_id=%s", chat_id)
+        await query.edit_message_text(
+            "❌ تم إلغاء الاشتراك.\n\nأرسل /start للاشتراك مجدداً."
+        )
+        return
+    else:
+        return
+
+    try:
+        await query.edit_message_text(
+            text,
+            parse_mode=parse_mode,
+            reply_markup=_main_keyboard(),
+        )
+    except Exception as exc:
+        # Silently ignore "message is not modified" — content was identical
+        if "message is not modified" not in str(exc).lower():
+            logger.warning("edit_message_text failed: %s", exc)
+
+
+# ==========================
 # Starlette route handlers
 # ==========================
 
@@ -919,6 +1077,7 @@ async def lifespan_startup() -> None:
     app.add_handler(CommandHandler("stats",   cmd_stats))
     app.add_handler(CommandHandler("health",  cmd_health))
     app.add_handler(CommandHandler("version", cmd_version))
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
 
     await app.initialize()
     await app.start()
@@ -936,6 +1095,24 @@ async def lifespan_startup() -> None:
         logger.info("Webhook registered: %s", webhook_full_url)
     except Exception:
         logger.exception("Failed to register webhook — bot may not receive updates.")
+
+    # Register bot command menu (shown when user types "/" in Telegram)
+    from telegram import BotCommand
+    try:
+        await app.bot.set_my_commands([
+            BotCommand("start",   "الاشتراك في الإشعارات"),
+            BotCommand("stop",    "إلغاء الاشتراك"),
+            BotCommand("count",   "عدد المشتركين"),
+            BotCommand("ping",    "التحقق من حالة البوت"),
+            BotCommand("status",  "تفاصيل حالة النظام"),
+            BotCommand("stats",   "إحصائيات البوت"),
+            BotCommand("health",  "التحقق من صحة البوت"),
+            BotCommand("version", "معلومات الإصدار"),
+            BotCommand("help",    "عرض قائمة الأوامر"),
+        ])
+        logger.info("Bot command menu registered.")
+    except Exception:
+        logger.exception("Failed to register bot command menu.")
 
     # Start background task manager (both monitors + keep-alive)
     _task_manager_task = asyncio.create_task(
