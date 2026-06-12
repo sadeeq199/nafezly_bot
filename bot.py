@@ -367,6 +367,8 @@ async def _seed_sent_projects_for_source(
     logger.info("[%s] sent_projects empty — seeding from current listings.", source)
     try:
         response = await http_get_with_retry(url)
+        with open("mostaql_page.html", "w", encoding="utf-8") as f:
+            f.write(response.text)
         projects = scraper(response.text)
         links = {link for _, link in projects}
         loop = asyncio.get_running_loop()
