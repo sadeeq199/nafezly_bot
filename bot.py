@@ -1,7 +1,7 @@
 """
-Nafezly Telegram Bot — v3.0
+Nafezly + Mostaql Telegram Bot — v4.0
 Single-port architecture: Starlette + uvicorn + python-telegram-bot webhook
-Author: refactored by Claude for 24/7 stability on Render
+Dual independent monitors: Nafezly & Mostaql
 """
 
 import asyncio
@@ -65,18 +65,24 @@ SECRET_TOKEN: str = os.environ.get("SECRET_TOKEN", secrets.token_hex(32))
 WEBHOOK_PATH: str = f"/{BOT_TOKEN}"
 
 NAFEZLY_URL: str = "https://nafezly.com/projects"
+MOSTAQL_URL: str = "https://mostaql.com/projects"
 CHECK_INTERVAL: int = 30
 RETRY_DELAY: int = 120
 MAX_SEND_CONCURRENCY: int = 10
 KEEP_ALIVE_INTERVAL: int = 300   # 5 minutes
-BOT_VERSION: str = "3.0.0"
+BOT_VERSION: str = "4.0.0"
+
+# Source identifiers
+SOURCE_NAFEZLY = "nafezly"
+SOURCE_MOSTAQL = "mostaql"
 
 # ==========================
 # Runtime state
 # ==========================
 
 _start_time: datetime = datetime.now(timezone.utc)
-_monitor_task: asyncio.Task | None = None
+_monitor_nafezly_task: asyncio.Task | None = None
+_monitor_mostaql_task: asyncio.Task | None = None
 _keepalive_task: asyncio.Task | None = None
 _task_manager_task: asyncio.Task | None = None
 
@@ -150,10 +156,30 @@ def init_db() -> None:
                 first_name TEXT
             )
         """)
+        # Create sent_projects with source column
         cur.execute("""
             CREATE TABLE IF NOT EXISTS sent_projects (
-                link TEXT PRIMARY KEY
+                link   TEXT NOT NULL,
+                source TEXT NOT NULL DEFAULT 'nafezly',
+                PRIMARY KEY (link, source)
             )
+        """)
+        # Migrate old table: add source column if it doesn't exist yet
+        cur.execute("""
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'sent_projects' AND column_name = 'link'
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM information_schema.columns
+                    WHERE table_name = 'sent_projects' AND column_name = 'source'
+                ) THEN
+                    ALTER TABLE sent_projects ADD COLUMN source TEXT NOT NULL DEFAULT 'nafezly';
+                    ALTER TABLE sent_projects DROP CONSTRAINT IF EXISTS sent_projects_pkey;
+                    ALTER TABLE sent_projects ADD PRIMARY KEY (link, source);
+                END IF;
+            END$$;
         """)
     logger.info("Database tables verified/created.")
 
@@ -191,23 +217,33 @@ def db_remove_subscriber(chat_id: int) -> None:
         cur.execute("DELETE FROM subscribers WHERE chat_id = %s", (chat_id,))
 
 
-def db_load_sent_projects() -> set[str]:
+def db_load_sent_projects(source: str) -> set[str]:
     with db_cursor() as cur:
-        cur.execute("SELECT link FROM sent_projects")
+        cur.execute("SELECT link FROM sent_projects WHERE source = %s", (source,))
         return {row[0] for row in cur.fetchall()}
 
 
-def db_add_sent_project(link: str) -> None:
+def db_add_sent_project(link: str, source: str) -> None:
     with db_cursor() as cur:
         cur.execute(
-            "INSERT INTO sent_projects (link) VALUES (%s) ON CONFLICT (link) DO NOTHING",
-            (link,),
+            """
+            INSERT INTO sent_projects (link, source)
+            VALUES (%s, %s)
+            ON CONFLICT (link, source) DO NOTHING
+            """,
+            (link, source),
         )
 
 
 def db_count_sent_projects() -> int:
     with db_cursor() as cur:
         cur.execute("SELECT COUNT(*) FROM sent_projects")
+        return cur.fetchone()[0]
+
+
+def db_count_sent_projects_by_source(source: str) -> int:
+    with db_cursor() as cur:
+        cur.execute("SELECT COUNT(*) FROM sent_projects WHERE source = %s", (source,))
         return cur.fetchone()[0]
 
 
@@ -272,32 +308,76 @@ async def http_get_with_retry(
 
 
 # ==========================
-# Project scraper
+# Project scrapers
 # ==========================
 
-def _scrape_project_links(html: str) -> list[tuple[str, str]]:
+def _scrape_nafezly_projects(html: str) -> list[tuple[str, str]]:
+    """Scrape project links from Nafezly HTML."""
     soup = BeautifulSoup(html, "html.parser")
     results = []
     for tag in soup.select("a[href*='/project/']"):
         href = tag["href"]
         title = tag.get_text(strip=True)
-        results.append((title, href))
+        if title:
+            results.append((title, href))
     return results
 
 
-async def _seed_sent_projects(client: httpx.AsyncClient) -> set[str]:
-    logger.info("sent_projects is empty — seeding from current listings.")
+def _scrape_mostaql_projects(html: str) -> list[tuple[str, str]]:
+    """Scrape project links from Mostaql HTML."""
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    seen = set()
+    # Mostaql project links: /projects/<id>-<slug>
+    for tag in soup.select("a[href*='/projects/']"):
+        href = tag.get("href", "")
+        # Normalise to absolute URL
+        if href.startswith("/"):
+            href = "https://mostaql.com" + href
+        # Filter out the listing page itself and pagination links
+        if "/projects/" not in href:
+            continue
+        # Strip query strings / anchors
+        clean = href.split("?")[0].split("#")[0]
+        # Must have a project slug segment beyond /projects/
+        parts = [p for p in clean.rstrip("/").split("/") if p]
+        if len(parts) < 2 or parts[-1] == "projects":
+            continue
+        if clean in seen:
+            continue
+        seen.add(clean)
+        title = tag.get_text(strip=True)
+        if title:
+            results.append((title, clean))
+    return results
+
+
+# ==========================
+# Seeding helpers
+# ==========================
+
+async def _seed_sent_projects_for_source(
+    url: str,
+    scraper,
+    source: str,
+) -> set[str]:
+    """Seed sent_projects for a given source from its current listings."""
+    logger.info("[%s] sent_projects empty — seeding from current listings.", source)
     try:
-        response = await http_get_with_retry(NAFEZLY_URL)
-        projects = _scrape_project_links(response.text)
+        response = await http_get_with_retry(url)
+        projects = scraper(response.text)
         links = {link for _, link in projects}
         loop = asyncio.get_running_loop()
         for link in links:
-            await loop.run_in_executor(None, db_add_sent_project, link)
-        logger.info("Seeded %d existing project links.", len(links))
+            await loop.run_in_executor(
+                None, db_add_sent_project, link, source
+            )
+        logger.info("[%s] Seeded %d existing project links.", source, len(links))
         return links
     except Exception:
-        logger.exception("Failed to seed sent_projects; will retry next cycle.")
+        logger.exception(
+            "[%s] Failed to seed sent_projects; will retry next cycle.", source
+        )
         return set()
 
 
@@ -364,73 +444,115 @@ async def _send_to_subscribers(
 
 
 # ==========================
-# Project monitor task
+# Generic monitor loop
 # ==========================
 
-async def check_projects(app: Application) -> None:
-    logger.info("Project monitor started.")
+async def _monitor_loop(
+    app: Application,
+    source: str,
+    url: str,
+    scraper,
+    notification_header: str,
+) -> None:
+    """
+    Generic monitor loop reused by both Nafezly and Mostaql monitors.
+    Loads sent projects for this source, seeds if empty, then polls forever.
+    """
+    logger.info("[%s] Monitor started.", source)
     loop = asyncio.get_running_loop()
 
     try:
         sent_projects: set[str] = await loop.run_in_executor(
-            None, _db_operation_with_retry, db_load_sent_projects
+            None,
+            lambda: _db_operation_with_retry(db_load_sent_projects, source),
         )
     except Exception:
-        logger.exception("Could not load sent_projects from DB. Starting fresh.")
+        logger.exception("[%s] Could not load sent_projects from DB. Starting fresh.", source)
         sent_projects = set()
 
     if not sent_projects:
-        sent_projects = await _seed_sent_projects(get_http_client())
+        sent_projects = await _seed_sent_projects_for_source(url, scraper, source)
 
     while True:
         try:
-            response = await http_get_with_retry(NAFEZLY_URL)
-            projects = _scrape_project_links(response.text)
+            response = await http_get_with_retry(url)
+            projects = scraper(response.text)
             new_projects = [(t, l) for t, l in projects if l not in sent_projects]
 
             if new_projects:
                 try:
                     subscribers: list[dict] = await loop.run_in_executor(
-                        None, _db_operation_with_retry, db_load_subscribers
+                        None,
+                        lambda: _db_operation_with_retry(db_load_subscribers),
                     )
                 except Exception:
-                    logger.exception("Failed to load subscribers; skipping notification.")
+                    logger.exception(
+                        "[%s] Failed to load subscribers; skipping notification.", source
+                    )
                     subscribers = []
 
                 for title, link in new_projects:
                     sent_projects.add(link)
                     try:
-                        await loop.run_in_executor(None, db_add_sent_project, link)
+                        await loop.run_in_executor(
+                            None, db_add_sent_project, link, source
+                        )
                     except Exception:
                         logger.exception(
-                            "Failed to persist sent project link: %s", link
+                            "[%s] Failed to persist sent project link: %s", source, link
                         )
 
                     message = (
-                        "🚨 مشروع جديد على نفذلي\n\n"
-                        f"📌 العنوان:\n{title}\n\n"
-                        f"🔗 رابط المشروع:\n{link}"
+                        f"{notification_header}\n\n"
+                        f"📌 {title}\n"
+                        f"🔗 {link}"
                     )
-                    logger.info("New project detected: %s", link)
+                    logger.info("[%s] New project detected: %s", source, link)
                     await _send_to_subscribers(app, message, subscribers)
 
             await asyncio.sleep(CHECK_INTERVAL)
 
         except asyncio.CancelledError:
-            logger.info("Project monitor task cancelled — shutting down.")
+            logger.info("[%s] Monitor task cancelled — shutting down.", source)
             raise
 
         except (httpx.TimeoutException, httpx.RequestError) as exc:
             logger.warning(
-                "HTTP error in monitor: %s — retrying in %ds.", exc, RETRY_DELAY
+                "[%s] HTTP error in monitor: %s — retrying in %ds.", source, exc, RETRY_DELAY
             )
             await asyncio.sleep(RETRY_DELAY)
 
         except Exception:
             logger.exception(
-                "Unexpected error in project monitor — retrying in %ds.", RETRY_DELAY
+                "[%s] Unexpected error in monitor — retrying in %ds.", source, RETRY_DELAY
             )
             await asyncio.sleep(RETRY_DELAY)
+
+
+# ==========================
+# Named monitor coroutines
+# ==========================
+
+async def check_nafezly_projects(app: Application) -> None:
+    """Monitor Nafezly for new projects."""
+    await _monitor_loop(
+        app=app,
+        source=SOURCE_NAFEZLY,
+        url=NAFEZLY_URL,
+        scraper=_scrape_nafezly_projects,
+        notification_header="🚨 New project on Nafezly",
+    )
+
+
+async def check_mostaql_projects(app: Application) -> None:
+    """Monitor Mostaql for new projects."""
+    await _monitor_loop(
+        app=app,
+        source=SOURCE_MOSTAQL,
+        url=MOSTAQL_URL,
+        scraper=_scrape_mostaql_projects,
+        notification_header="🚨 New project on Mostaql",
+    )
 
 
 # ==========================
@@ -461,38 +583,51 @@ async def keep_alive_loop() -> None:
 # ==========================
 
 async def task_manager(app: Application) -> None:
-    """Watchdog: restarts monitor and keep-alive if they crash."""
-    global _monitor_task, _keepalive_task
+    """Watchdog: restarts all monitors and keep-alive if they crash."""
+    global _monitor_nafezly_task, _monitor_mostaql_task, _keepalive_task
     logger.info("Task manager started.")
 
-    _monitor_task = asyncio.create_task(
-        check_projects(app), name="project_monitor"
+    _monitor_nafezly_task = asyncio.create_task(
+        check_nafezly_projects(app), name="monitor_nafezly"
     )
-    _keepalive_task = asyncio.create_task(keep_alive_loop(), name="keep_alive")
+    _monitor_mostaql_task = asyncio.create_task(
+        check_mostaql_projects(app), name="monitor_mostaql"
+    )
+    _keepalive_task = asyncio.create_task(
+        keep_alive_loop(), name="keep_alive"
+    )
 
     while True:
         try:
             await asyncio.sleep(10)
 
-            if _monitor_task.done() and not _monitor_task.cancelled():
-                exc = _monitor_task.exception() if not _monitor_task.cancelled() else None
+            # --- Nafezly monitor ---
+            if _monitor_nafezly_task.done() and not _monitor_nafezly_task.cancelled():
+                exc = _monitor_nafezly_task.exception() if not _monitor_nafezly_task.cancelled() else None
                 if exc:
-                    logger.critical(
-                        "project_monitor crashed: %s — restarting.", exc
-                    )
+                    logger.critical("monitor_nafezly crashed: %s — restarting.", exc)
                 else:
-                    logger.warning("project_monitor exited cleanly — restarting.")
-                _monitor_task = asyncio.create_task(
-                    check_projects(app), name="project_monitor"
+                    logger.warning("monitor_nafezly exited cleanly — restarting.")
+                _monitor_nafezly_task = asyncio.create_task(
+                    check_nafezly_projects(app), name="monitor_nafezly"
                 )
-                logger.info("project_monitor restarted.")
+                logger.info("monitor_nafezly restarted.")
 
-            if _keepalive_task.done() and not _keepalive_task.cancelled():
-                exc = (
-                    _keepalive_task.exception()
-                    if not _keepalive_task.cancelled()
-                    else None
+            # --- Mostaql monitor ---
+            if _monitor_mostaql_task.done() and not _monitor_mostaql_task.cancelled():
+                exc = _monitor_mostaql_task.exception() if not _monitor_mostaql_task.cancelled() else None
+                if exc:
+                    logger.critical("monitor_mostaql crashed: %s — restarting.", exc)
+                else:
+                    logger.warning("monitor_mostaql exited cleanly — restarting.")
+                _monitor_mostaql_task = asyncio.create_task(
+                    check_mostaql_projects(app), name="monitor_mostaql"
                 )
+                logger.info("monitor_mostaql restarted.")
+
+            # --- Keep-alive ---
+            if _keepalive_task.done() and not _keepalive_task.cancelled():
+                exc = _keepalive_task.exception() if not _keepalive_task.cancelled() else None
                 if exc:
                     logger.critical("keep_alive crashed: %s — restarting.", exc)
                 else:
@@ -556,7 +691,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if inserted:
         await update.message.reply_text(
-            "✅ تم الاشتراك بنجاح.\nستصلك إشعارات المشاريع الجديدة من نفذلي."
+            "✅ تم الاشتراك بنجاح.\nستصلك إشعارات المشاريع الجديدة من نفذلي ومستقل."
         )
     else:
         await update.message.reply_text("✅ أنت مشترك بالفعل.")
@@ -640,7 +775,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     text = (
         "📊 *Bot Status*\n\n"
         f"🤖 Bot: 🟢 Online\n"
-        f"📡 Monitor: {_task_status(_monitor_task)}\n"
+        f"📡 Nafezly Monitor: {_task_status(_monitor_nafezly_task)}\n"
+        f"📡 Mostaql Monitor: {_task_status(_monitor_mostaql_task)}\n"
         f"💓 Keep-alive: {_task_status(_keepalive_task)}\n"
         f"👥 Subscribers: {sub_count}\n"
         f"📁 Known Projects: {proj_count}\n"
@@ -653,18 +789,27 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     loop = asyncio.get_running_loop()
     try:
         sub_count = len(await loop.run_in_executor(None, db_load_subscribers))
-        proj_count = await loop.run_in_executor(None, db_count_sent_projects)
+        proj_total = await loop.run_in_executor(None, db_count_sent_projects)
+        proj_nafezly = await loop.run_in_executor(
+            None, db_count_sent_projects_by_source, SOURCE_NAFEZLY
+        )
+        proj_mostaql = await loop.run_in_executor(
+            None, db_count_sent_projects_by_source, SOURCE_MOSTAQL
+        )
         db_ok = await loop.run_in_executor(None, db_check_connection)
     except Exception:
-        sub_count = proj_count = -1
+        sub_count = proj_total = proj_nafezly = proj_mostaql = -1
         db_ok = False
 
     text = (
         "📈 *Bot Statistics*\n\n"
         f"👥 Total Subscribers: {sub_count}\n"
-        f"📁 Total Known Projects: {proj_count}\n"
+        f"📁 Total Known Projects: {proj_total}\n"
+        f"   ├ Nafezly: {proj_nafezly}\n"
+        f"   └ Mostaql: {proj_mostaql}\n"
         f"🗄 Database: {'🟢 Connected' if db_ok else '🔴 Error'}\n"
-        f"📡 Monitor: {_task_status(_monitor_task)}"
+        f"📡 Nafezly Monitor: {_task_status(_monitor_nafezly_task)}\n"
+        f"📡 Mostaql Monitor: {_task_status(_monitor_mostaql_task)}"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
@@ -701,7 +846,6 @@ async def handle_health(request: Request) -> PlainTextResponse:
 
 async def handle_webhook(request: Request) -> PlainTextResponse:
     """POST /<BOT_TOKEN> — Telegram webhook endpoint."""
-    # Validate the secret token Telegram sends
     if SECRET_TOKEN:
         incoming = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
         if incoming != SECRET_TOKEN:
@@ -724,7 +868,6 @@ async def handle_webhook(request: Request) -> PlainTextResponse:
     except Exception:
         logger.exception("Error processing Telegram update.")
 
-    # Always return 200 so Telegram doesn't retry
     return PlainTextResponse("OK", status_code=200)
 
 
@@ -737,7 +880,7 @@ async def lifespan_startup() -> None:
     global _ptb_app, _task_manager_task
 
     logger.info("=" * 60)
-    logger.info("Nafezly Bot v%s starting up.", BOT_VERSION)
+    logger.info("Nafezly + Mostaql Bot v%s starting up.", BOT_VERSION)
     logger.info(
         "Python %s | Render=%s",
         platform.python_version(),
@@ -752,7 +895,7 @@ async def lifespan_startup() -> None:
         logger.exception("FATAL: Could not initialise database. Exiting.")
         sys.exit(1)
 
-    # Build the PTB Application (no run_webhook — we drive it manually)
+    # Build the PTB Application
     app = (
         Application.builder()
         .token(BOT_TOKEN)
@@ -770,7 +913,6 @@ async def lifespan_startup() -> None:
     app.add_handler(CommandHandler("health",  cmd_health))
     app.add_handler(CommandHandler("version", cmd_version))
 
-    # Initialise PTB internals (bot session, etc.)
     await app.initialize()
     await app.start()
     _ptb_app = app
@@ -788,7 +930,7 @@ async def lifespan_startup() -> None:
     except Exception:
         logger.exception("Failed to register webhook — bot may not receive updates.")
 
-    # Start background task manager (monitor + keep-alive)
+    # Start background task manager (both monitors + keep-alive)
     _task_manager_task = asyncio.create_task(
         task_manager(app), name="task_manager"
     )
@@ -798,15 +940,15 @@ async def lifespan_startup() -> None:
 
 async def lifespan_shutdown() -> None:
     """Called by uvicorn on shutdown."""
-    global _task_manager_task, _monitor_task, _keepalive_task, _ptb_app
+    global _task_manager_task, _monitor_nafezly_task, _monitor_mostaql_task, _keepalive_task, _ptb_app
 
     logger.info("Shutdown initiated.")
 
-    # Cancel background tasks
     for task, name in [
-        (_task_manager_task, "task_manager"),
-        (_monitor_task, "project_monitor"),
-        (_keepalive_task, "keep_alive"),
+        (_task_manager_task,    "task_manager"),
+        (_monitor_nafezly_task, "monitor_nafezly"),
+        (_monitor_mostaql_task, "monitor_mostaql"),
+        (_keepalive_task,       "keep_alive"),
     ]:
         if task and not task.done():
             task.cancel()
@@ -816,7 +958,6 @@ async def lifespan_shutdown() -> None:
                 pass
             logger.info("%s stopped.", name)
 
-    # Stop PTB
     if _ptb_app is not None:
         try:
             await _ptb_app.stop()
@@ -839,9 +980,6 @@ async def lifespan_shutdown() -> None:
 # Starlette ASGI app
 # ==========================
 
-# We use a custom lifespan context manager for Starlette
-
-
 @asynccontextmanager
 async def lifespan(app):
     await lifespan_startup()
@@ -851,9 +989,9 @@ async def lifespan(app):
 
 starlette_app = Starlette(
     routes=[
-        Route("/",              handle_root,    methods=["GET"]),
-        Route("/health",        handle_health,  methods=["GET"]),
-        Route(WEBHOOK_PATH,     handle_webhook, methods=["POST"]),
+        Route("/",          handle_root,    methods=["GET"]),
+        Route("/health",    handle_health,  methods=["GET"]),
+        Route(WEBHOOK_PATH, handle_webhook, methods=["POST"]),
     ],
     lifespan=lifespan,
 )
@@ -868,7 +1006,7 @@ def main() -> None:
         starlette_app,
         host="0.0.0.0",
         port=PORT,
-        log_level="warning",       # uvicorn access logs handled by our logger
+        log_level="warning",
         access_log=False,
         lifespan="on",
     )
