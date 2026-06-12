@@ -326,7 +326,7 @@ def _scrape_nafezly_projects(html: str) -> list[tuple[str, str]]:
 
 
 def _scrape_mostaql_projects(html: str) -> list[tuple[str, str]]:
-    """Scrape real Mostaql projects and remove duplicates."""
+    """Extract real Mostaql projects without duplicates."""
     soup = BeautifulSoup(html, "html.parser")
 
     results = []
@@ -338,29 +338,28 @@ def _scrape_mostaql_projects(html: str) -> list[tuple[str, str]]:
         if href.startswith("/"):
             href = "https://mostaql.com" + href
 
-        # نريد فقط روابط المشاريع الحقيقية
+        # تجاهل أي شيء ليس مشروعًا حقيقيًا
         if "/project/" not in href:
             continue
 
-        # تجاهل مشروع مماثل
+        # تجاهل "مشروع مماثل"
         if "/project/create" in href:
             continue
 
-        # إزالة query strings
+        # إزالة الـ query string
         href = href.split("?")[0]
 
-        # منع التكرار
+        # منع تكرار نفس الرابط
         if href in seen:
             continue
 
-        seen.add(href)
-
         title = tag.get_text(" ", strip=True)
 
-        # تجاهل الأوصاف الطويلة
-        if not title or len(title) > 150:
+        # تجاهل النصوص الفارغة والوصف الطويل
+        if not title or len(title) > 120:
             continue
 
+        seen.add(href)
         results.append((title, href))
 
     logger.info(f"[MOSTAQL] Real projects found: {len(results)}")
