@@ -846,11 +846,18 @@ async def handle_health(request: Request) -> PlainTextResponse:
 
 async def handle_webhook(request: Request) -> PlainTextResponse:
     """POST /<BOT_TOKEN> — Telegram webhook endpoint."""
-    if SECRET_TOKEN:
-        incoming = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if incoming != SECRET_TOKEN:
-            logger.warning("Webhook received with invalid secret token.")
-            return PlainTextResponse("Forbidden", status_code=403)
+    incoming = request.headers.get(
+        "X-Telegram-Bot-Api-Secret-Token"
+    )
+
+    if incoming and incoming != SECRET_TOKEN:
+        logger.warning(
+            "Webhook received with invalid secret token."
+        )
+        return PlainTextResponse(
+            "Forbidden",
+            status_code=403
+        )
 
     try:
         data = await request.json()
