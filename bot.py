@@ -365,33 +365,6 @@ def _scrape_mostaql_projects(html: str) -> list[tuple[str, str]]:
     logger.info(f"[MOSTAQL] Real projects found: {len(results)}")
 
     return results
-    """Scrape project links from Mostaql HTML."""
-    soup = BeautifulSoup(html, "html.parser")
-    results = []
-    seen = set()
-    # Mostaql project links: /projects/<id>-<slug>
-    for tag in soup.select("a[href*='/projects/']"):
-        href = tag.get("href", "")
-        # Normalise to absolute URL
-        if href.startswith("/"):
-            href = "https://mostaql.com" + href
-        # Filter out the listing page itself and pagination links
-        if "/projects/" not in href:
-            continue
-        # Strip query strings / anchors
-        clean = href.split("?")[0].split("#")[0]
-        # Must have a project slug segment beyond /projects/
-        parts = [p for p in clean.rstrip("/").split("/") if p]
-        if len(parts) < 2 or parts[-1] == "projects":
-            continue
-        if clean in seen:
-            continue
-        seen.add(clean)
-        title = tag.get_text(strip=True)
-        if title:
-            results.append((title, clean))
-    return results
-
 
 # ==========================
 # Seeding helpers
