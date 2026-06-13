@@ -362,7 +362,6 @@ def _scrape_mostaql_projects(html: str) -> list[tuple[str, str]]:
         seen.add(href)
         results.append((title, href))
 
-    logger.info(f"[MOSTAQL] Real projects found: {len(results)}")
 
     return results
 
@@ -493,14 +492,9 @@ async def _monitor_loop(
         try:
             response = await http_get_with_retry(url)
             projects = scraper(response.text)
-            if source == SOURCE_MOSTAQL:
-                logger.info(f"[MOSTAQL] Total projects found: {len(projects)}")
 
-                for title, link in projects[:10]:
-                    logger.info(f"[MOSTAQL] {title} -> {link}")
             new_projects = [(t, l) for t, l in projects if l not in sent_projects]
-            if source == SOURCE_MOSTAQL:
-                logger.info(f"[MOSTAQL] New projects count: {len(new_projects)}")
+
 
             if new_projects:
                 try:
